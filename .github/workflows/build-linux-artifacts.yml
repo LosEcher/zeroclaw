@@ -103,7 +103,7 @@ jobs:
 
       - name: Restore Rust cache
         if: matrix.target != 'aarch64-unknown-linux-gnu' || steps.vars.outputs.include_aarch64 == 'true'
-        uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        uses: Swatinem/rust-cache@v2
 
       - name: Install cross compiler
         if: (matrix.target != 'aarch64-unknown-linux-gnu' || steps.vars.outputs.include_aarch64 == 'true') && matrix.cross_compiler != ''
