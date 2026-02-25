@@ -304,12 +304,21 @@ impl Channel for SignalChannel {
         let max_delay_secs = 60u64;
 
         loop {
-            let resp = self
-                .http_client()
-                .get(url.clone())
-                .header("Accept", "text/event-stream")
-                .send()
-                .await;
+            if tx.is_closed() {
+                tracing::info!("Signal channel shutting down");
+                return Ok(());
+            }
+            let resp = tokio::select! {
+                _ = tx.closed() => {
+                    tracing::info!("Signal channel shutting down");
+                    return Ok(());
+                }
+                result = self
+                    .http_client()
+                    .get(url.clone())
+                    .header("Accept", "text/event-stream")
+                    .send() => result,
+            };
 
             let resp = match resp {
                 Ok(r) if r.status().is_success() => r,
@@ -317,13 +326,25 @@ impl Channel for SignalChannel {
                     let status = r.status();
                     let body = r.text().await.unwrap_or_default();
                     tracing::warn!("Signal SSE returned {status}: {body}");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
+                    tokio::select! {
+                        _ = tx.closed() => {
+                            tracing::info!("Signal channel shutting down");
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)) => {}
+                    }
                     retry_delay_secs = (retry_delay_secs * 2).min(max_delay_secs);
                     continue;
                 }
                 Err(e) => {
                     tracing::warn!("Signal SSE connect error: {e}, retrying...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
+                    tokio::select! {
+                        _ = tx.closed() => {
+                            tracing::info!("Signal channel shutting down");
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)) => {}
+                    }
                     retry_delay_secs = (retry_delay_secs * 2).min(max_delay_secs);
                     continue;
                 }
@@ -335,7 +356,17 @@ impl Channel for SignalChannel {
             let mut buffer = String::new();
             let mut current_data = String::new();
 
-            while let Some(chunk) = bytes_stream.next().await {
+            loop {
+                let chunk = tokio::select! {
+                    _ = tx.closed() => {
+                        tracing::info!("Signal channel shutting down");
+                        return Ok(());
+                    }
+                    next = bytes_stream.next() => next,
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
@@ -408,7 +439,13 @@ impl Channel for SignalChannel {
             }
 
             tracing::debug!("Signal SSE stream ended, reconnecting...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tx.closed() => {
+                    tracing::info!("Signal channel shutting down");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {}
+            }
         }
     }
 

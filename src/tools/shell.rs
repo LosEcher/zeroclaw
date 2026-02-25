@@ -57,6 +57,17 @@ fn collect_allowed_shell_env_vars(security: &SecurityPolicy) -> Vec<String> {
     out
 }
 
+fn truncate_at_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut cutoff = max_bytes;
+    while cutoff > 0 && !s.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    s.truncate(cutoff);
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -153,6 +164,8 @@ impl Tool for ShellTool {
                 cmd.env(&var, val);
             }
         }
+        // Ensure timeout cancellation also terminates the child process.
+        cmd.kill_on_drop(true);
 
         let result =
             tokio::time::timeout(Duration::from_secs(SHELL_TIMEOUT_SECS), cmd.output()).await;
@@ -164,11 +177,11 @@ impl Tool for ShellTool {
 
                 // Truncate output to prevent OOM
                 if stdout.len() > MAX_OUTPUT_BYTES {
-                    stdout.truncate(stdout.floor_char_boundary(MAX_OUTPUT_BYTES));
+                    truncate_at_char_boundary(&mut stdout, MAX_OUTPUT_BYTES);
                     stdout.push_str("\n... [output truncated at 1MB]");
                 }
                 if stderr.len() > MAX_OUTPUT_BYTES {
-                    stderr.truncate(stderr.floor_char_boundary(MAX_OUTPUT_BYTES));
+                    truncate_at_char_boundary(&mut stderr, MAX_OUTPUT_BYTES);
                     stderr.push_str("\n... [stderr truncated at 1MB]");
                 }
 

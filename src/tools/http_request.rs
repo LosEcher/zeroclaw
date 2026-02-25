@@ -2,7 +2,7 @@ use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// HTTP request tool for API interactions.
@@ -12,6 +12,7 @@ pub struct HttpRequestTool {
     allowed_domains: Vec<String>,
     max_response_size: usize,
     timeout_secs: u64,
+    client: OnceLock<Result<reqwest::Client, String>>,
 }
 
 impl HttpRequestTool {
@@ -26,6 +27,7 @@ impl HttpRequestTool {
             allowed_domains: normalize_allowed_domains(allowed_domains),
             max_response_size,
             timeout_secs,
+            client: OnceLock::new(),
         }
     }
 
@@ -114,19 +116,7 @@ impl HttpRequestTool {
         headers: Vec<(String, String)>,
         body: Option<&str>,
     ) -> anyhow::Result<reqwest::Response> {
-        let timeout_secs = if self.timeout_secs == 0 {
-            tracing::warn!("http_request: timeout_secs is 0, using safe default of 30s");
-            30
-        } else {
-            self.timeout_secs
-        };
-        let builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none());
-        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.http_request");
-        let client = builder.build()?;
-
+        let client = self.http_client()?;
         let mut request = client.request(method, url);
 
         for (key, value) in headers {
@@ -138,6 +128,27 @@ impl HttpRequestTool {
         }
 
         Ok(request.send().await?)
+    }
+
+    fn http_client(&self) -> anyhow::Result<&reqwest::Client> {
+        let timeout_secs = if self.timeout_secs == 0 {
+            tracing::warn!("http_request: timeout_secs is 0, using safe default of 30s");
+            30
+        } else {
+            self.timeout_secs
+        };
+        let result = self.client.get_or_init(|| {
+            let builder = reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_secs))
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none());
+            let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.http_request");
+            builder.build().map_err(|e| e.to_string())
+        });
+        match result {
+            Ok(client) => Ok(client),
+            Err(e) => Err(anyhow::anyhow!("failed to initialize http client: {e}")),
+        }
     }
 
     fn truncate_response(&self, text: &str) -> String {

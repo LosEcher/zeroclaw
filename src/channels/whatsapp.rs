@@ -202,7 +202,7 @@ impl Channel for WhatsAppChannel {
         Ok(())
     }
 
-    async fn listen(&self, _tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+    async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         // WhatsApp uses webhooks (push-based), not polling.
         // Messages are received via the gateway's /whatsapp endpoint.
         // This method keeps the channel "alive" but doesn't actively poll.
@@ -211,10 +211,10 @@ impl Channel for WhatsAppChannel {
             Configure Meta webhook to POST to your gateway's /whatsapp endpoint."
         );
 
-        // Keep the task alive — it will be cancelled when the channel shuts down
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        }
+        // Wait until the receiver side is dropped by supervisor shutdown.
+        tx.closed().await;
+        tracing::info!("WhatsApp channel listener stopped");
+        Ok(())
     }
 
     async fn health_check(&self) -> bool {

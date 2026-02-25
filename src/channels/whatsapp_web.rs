@@ -465,15 +465,33 @@ impl Channel for WhatsAppWebChannel {
         // Store the bot handle for later shutdown
         *self.bot_handle.lock() = Some(bot_handle);
 
-        // Wait for shutdown signal
-        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-
-        select! {
-            _ = shutdown_rx.recv() => {
-                tracing::info!("WhatsApp Web channel shutting down");
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("WhatsApp Web channel received Ctrl+C");
+        // Wait for either supervisor shutdown (tx closed) or unexpected bot exit.
+        loop {
+            select! {
+                _ = tx.closed() => {
+                    tracing::info!("WhatsApp Web channel shutting down");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    let finished = {
+                        let guard = self.bot_handle.lock();
+                        guard
+                            .as_ref()
+                            .is_some_and(tokio::task::JoinHandle::is_finished)
+                    };
+                    if finished {
+                        tracing::warn!("WhatsApp Web bot task exited unexpectedly");
+                        *self.client.lock() = None;
+                        let handle = {
+                            let mut guard = self.bot_handle.lock();
+                            guard.take()
+                        };
+                        if let Some(handle) = handle {
+                            let _ = handle.await;
+                        }
+                        return Err(anyhow!("WhatsApp Web bot task exited unexpectedly"));
+                    }
+                }
             }
         }
 
