@@ -304,6 +304,7 @@ pub struct LarkChannel {
     tenant_token: Arc<RwLock<Option<CachedTenantToken>>>,
     /// Dedup set: WS message_ids seen in last ~30 min to prevent double-dispatch
     ws_seen_ids: Arc<RwLock<HashMap<String, Instant>>>,
+    platform: LarkPlatform,
 }
 
 impl LarkChannel {
@@ -315,14 +316,16 @@ impl LarkChannel {
         allowed_users: Vec<String>,
         mention_only: bool,
     ) -> Self {
-        Self::new_with_platform(
+        let mut ch = Self::new_with_platform(
             app_id,
             app_secret,
             verification_token,
             port,
             allowed_users,
             LarkPlatform::Lark,
-        )
+        );
+        ch.mention_only = mention_only;
+        ch
     }
 
     fn new_with_platform(
@@ -340,11 +343,12 @@ impl LarkChannel {
             port,
             allowed_users,
             resolved_bot_open_id: Arc::new(StdRwLock::new(None)),
-            mention_only,
-            use_feishu: true,
+            mention_only: false,
+            use_feishu: platform == LarkPlatform::Feishu,
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
+            platform,
         }
     }
 
@@ -362,7 +366,37 @@ impl LarkChannel {
             config.verification_token.clone().unwrap_or_default(),
             config.port,
             config.allowed_users.clone(),
-            config.mention_only,
+            platform,
+        );
+        ch.mention_only = config.mention_only;
+        ch.receive_mode = config.receive_mode.clone();
+        ch
+    }
+
+    /// Build from `LarkConfig` (non-feishu)
+    pub fn from_lark_config(config: &crate::config::schema::LarkConfig) -> Self {
+        let mut ch = Self::new_with_platform(
+            config.app_id.clone(),
+            config.app_secret.clone(),
+            config.verification_token.clone().unwrap_or_default(),
+            config.port,
+            config.allowed_users.clone(),
+            LarkPlatform::Lark,
+        );
+        ch.mention_only = config.mention_only;
+        ch.receive_mode = config.receive_mode.clone();
+        ch
+    }
+
+    /// Build from `FeishuConfig`
+    pub fn from_feishu_config(config: &crate::config::schema::FeishuConfig) -> Self {
+        let mut ch = Self::new_with_platform(
+            config.app_id.clone(),
+            config.app_secret.clone(),
+            config.verification_token.clone().unwrap_or_default(),
+            config.port,
+            config.allowed_users.clone(),
+            LarkPlatform::Feishu,
         );
         ch.receive_mode = config.receive_mode.clone();
         ch
@@ -541,6 +575,7 @@ impl LarkChannel {
     /// (the caller reconnects).
     #[allow(clippy::too_many_lines)]
     async fn listen_ws(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        tracing::info!("Lark WS: starting listener for {}", self.channel_name());
         self.ensure_bot_open_id().await;
         let (wss_url, client_config) = self.get_ws_endpoint().await?;
         let service_id = wss_url
@@ -707,9 +742,13 @@ impl LarkChannel {
                         Err(e) => { tracing::error!("Lark: payload parse: {e}"); continue; }
                     };
 
-                    if recv.sender.sender_type == "app" || recv.sender.sender_type == "bot" { continue; }
+                    if recv.sender.sender_type == "app" || recv.sender.sender_type == "bot" {
+                        tracing::debug!("Lark WS: ignoring message from bot/app sender");
+                        continue;
+                    }
 
                     let sender_open_id = recv.sender.sender_id.open_id.as_deref().unwrap_or("");
+                    tracing::debug!("Lark WS: received message from user: {}", sender_open_id);
                     if !self.is_user_allowed(sender_open_id) {
                         tracing::warn!("Lark WS: ignoring {sender_open_id} (not in allowed_users)");
                         continue;
@@ -756,6 +795,8 @@ impl LarkChannel {
 
                     // Group-chat: only respond when explicitly @-mentioned
                     let bot_open_id = self.resolved_bot_open_id();
+                    tracing::debug!("Lark WS: chat_type={}, mention_only={}, bot_open_id={:?}",
+                        lark_msg.chat_type, self.mention_only, bot_open_id);
                     if lark_msg.chat_type == "group"
                         && !should_respond_in_group(
                             self.mention_only,
@@ -764,18 +805,9 @@ impl LarkChannel {
                             &post_mentioned_open_ids,
                         )
                     {
+                        tracing::debug!("Lark WS: ignoring group message (not mentioned)");
                         continue;
                     }
-
-                    let ack_emoji =
-                        random_lark_ack_reaction(Some(&event_payload), &text).to_string();
-                    let reaction_channel = self.clone();
-                    let reaction_message_id = lark_msg.message_id.clone();
-                    tokio::spawn(async move {
-                        reaction_channel
-                            .try_add_ack_reaction(&reaction_message_id, &ack_emoji)
-                            .await;
-                    });
 
                     let channel_msg = ChannelMessage {
                         id: Uuid::new_v4().to_string(),
@@ -790,8 +822,11 @@ impl LarkChannel {
                         thread_ts: None,
                     };
 
-                    tracing::debug!("Lark WS: message in {}", lark_msg.chat_id);
-                    if tx.send(channel_msg).await.is_err() { break; }
+                    tracing::info!("Lark WS: message in {} from {}: {:?}", lark_msg.chat_id, sender_open_id, text);
+                    if tx.send(channel_msg).await.is_err() {
+                        tracing::warn!("Lark WS: channel closed, stopping listener");
+                        break;
+                    }
                 }
             }
         }
@@ -922,7 +957,7 @@ impl LarkChannel {
     }
 
     async fn ensure_bot_open_id(&self) {
-        if !self.mention_only || self.resolved_bot_open_id().is_some() {
+        if self.resolved_bot_open_id().is_some() {
             return;
         }
 
