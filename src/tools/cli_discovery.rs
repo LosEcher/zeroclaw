@@ -104,6 +104,22 @@ const KNOWN_CLIS: &[KnownCli] = &[
         version_args: &["--version"],
         category: CliCategory::Language,
     },
+    // AI CLI tools
+    KnownCli {
+        name: "claude",
+        version_args: &["--version"],
+        category: CliCategory::Build,
+    },
+    KnownCli {
+        name: "codex",
+        version_args: &["--version"],
+        category: CliCategory::Build,
+    },
+    KnownCli {
+        name: "opencode",
+        version_args: &["--version"],
+        category: CliCategory::Build,
+    },
 ];
 
 /// Discover available CLI tools on the system.

@@ -58,6 +58,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # URL encoding for web search
 urlencoding = "2.1"
 
+# Unicode width calculation for terminal display (CJK characters display width)
+unicode-width = "0.2"
+
 # HTML to plain text conversion (web_fetch tool)
 nanohtml2text = "0.2"
 
