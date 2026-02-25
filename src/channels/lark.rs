@@ -809,6 +809,7 @@ impl LarkChannel {
                         continue;
                     }
 
+                    tracing::info!("Lark WS: message in {} from {}: {:?}", lark_msg.chat_id, sender_open_id, text);
                     let channel_msg = ChannelMessage {
                         id: Uuid::new_v4().to_string(),
                         sender: lark_msg.chat_id.clone(),
@@ -822,7 +823,6 @@ impl LarkChannel {
                         thread_ts: None,
                     };
 
-                    tracing::info!("Lark WS: message in {} from {}: {:?}", lark_msg.chat_id, sender_open_id, text);
                     if tx.send(channel_msg).await.is_err() {
                         tracing::warn!("Lark WS: channel closed, stopping listener");
                         break;
